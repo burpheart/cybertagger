@@ -64,7 +64,7 @@ body_contain("{\"timestamp\":\"") && body_contain("\",\"status\":") && body_cont
 "country":"中国",
 "province":"台湾",
 "city":"桃园市",
-"finger":["Apache-Web-Server"] //指纹产品名 数组
+"finger":["Boa-Web-Server"] //指纹产品名 数组
 }
 
 ```
