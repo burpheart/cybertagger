@@ -390,7 +390,7 @@ func (f *MFinger) Init() {
 				cel.BoolType,
 				cel.UnaryBinding(func(lhs ref.Val) ref.Val {
 
-					return types.Bool(strings.Contains(fmt.Sprintf("%v", f.TLSData), lhs.Value().(string)))
+					return types.Bool(strings.Contains(f.TLSData, lhs.Value().(string)))
 				},
 				),
 			),
