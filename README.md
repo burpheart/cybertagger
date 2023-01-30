@@ -35,10 +35,36 @@ port_contain 端口 完全匹配
 
 语法
 ! || && ()
-
 ```
 示例规则
 ```
 body_contain("{\"timestamp\":\"") && body_contain("\",\"status\":") && body_contain(",\"message\":") && body_contain(",\"path\":")
+```
+
+输入
+```
+{...
+"tls":{...},
+"webserver":"Boa/0.94.14rc21",
+"body":"...",
+"title":"...",
+"host":"11.45.1.4",
+"path":"/",
+"raw_header":"...."
+}
+
+
+```
+
+
+输出
+
+```
+{ ... 
+"country":"中国",
+"province":"台湾",
+"city":"桃园市",
+"finger":["Apache-Web-Server"] //指纹产品名 数组
+}
 
 ```
