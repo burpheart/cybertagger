@@ -8,11 +8,13 @@ import (
 	"github.com/google/cel-go/common/types"
 	"github.com/google/cel-go/common/types/ref"
 	"github.com/ipipdotnet/ipdb-go"
+	"io"
 	"log"
 	"os"
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -212,7 +214,12 @@ type Result struct {
 	Finger             []string               `json:"finger,omitempty" csv:"finger"`
 }
 
+var InputLines uint64 = 0
+var OutLines uint64 = 0
+var LastOutLines uint64 = 0
+
 func RunNew(finger bool, src string, dst string, taskid string) {
+	timeTickerChan := time.Tick(time.Second * 1)
 	//TODO 不知道为什么丟数据 结尾部分数据行丢失  丢失数量差不多和线程数一样
 	//多线程  非常消耗内存 6000条规则 一个线程至少占用160M内存 可以跑满cpu
 	var mu sync.Mutex
@@ -225,31 +232,66 @@ func RunNew(finger bool, src string, dst string, taskid string) {
 		f.Init()
 		mf = append(mf, &f)
 	}
+	fmt.Printf("成功解析%d条规则\n", len(mf[0].Grules))
+	go func() {
+		for {
+			tempnum := atomic.LoadUint64(&OutLines)
+			io.WriteString(os.Stderr, fmt.Sprintf("Input: %d Out: %d %6.3d/s       \r", InputLines, OutLines, (tempnum-LastOutLines)/1))
+			LastOutLines = tempnum
+			<-timeTickerChan
+		}
+	}()
 	f, _ := os.OpenFile(dst, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0666)
 	db, err := ipdb.NewCity("ipip.ipdb") // 使用 IPIP数据库 https://www.ipip.net/free_download/
 	if err != nil {
 		log.Fatal(err)
 	}
 	file, _ := os.Open(src)
-	const maxCapacity = 1024 * 1024 * 10 //限制单行10M
-	buf := make([]byte, maxCapacity)
-	input := bufio.NewScanner(file)
-	input.Buffer(buf, maxCapacity)
+	//const maxCapacity = 1024 * 1024 * 10 //限制单行10M
+	//buf := make([]byte, maxCapacity)
+	//input := bufio.NewScanner(file)
+	//input.Buffer(buf, maxCapacity)
 
 	jsonEncoder := json.NewEncoder(f)
-	for input.Scan() {
+	input := bufio.NewReader(file)
+	//const Capacity = 1024 * 1024 * 10 //默认10M空间
+	//linebuf := make([]byte, Capacity)
+	var linebuf string
+	for {
+		//s := input.Bytes()
+		s, err := input.ReadString('\n')
+		if err != nil {
+			if err == bufio.ErrBufferFull {
+				linebuf = linebuf + s
+				continue
+			}
+			if err == io.EOF {
+				break
+			}
+			log.Fatalf(err.Error())
+		}
+		if len(linebuf) > 0 {
+			s = linebuf + s
+			linebuf = ""
+		}
 		ch <- true
-		s := input.Text()
 		go func(s string) {
+			atomic.AddUint64(&InputLines, 1)
 			defer func() { <-ch }()
 			var row Result
 			err := json.Unmarshal([]byte(s), &row)
-			if err != nil || row.Failed {
+
+			if err != nil {
+				fmt.Println("DecodeErr:", string(s), err)
+				return
+			}
+			if row.Failed {
 				return
 			}
 			a, err := db.Find(row.Host, "CN")
 			if err != nil {
-				return //TODO IP
+				fmt.Println("IPDbErr:", row.Host)
+				row.Country = "未知"
 			}
 			switch len(a) {
 			case 3:
@@ -264,41 +306,45 @@ func RunNew(finger bool, src string, dst string, taskid string) {
 			}
 			row.Ip = row.Host
 			if finger {
-				//	for {
-				//	ok := false
-				for _, s := range mf {
-					s.Lock()
-					if !s.isUsed {
-						s.isUsed = true
-						s.Unlock()
-						s.ResponseHeader = &row.RawHeader //不要拷贝
-						s.ResponseBody = &row.ResponseBody
-						s.TLSData = fmt.Sprintf("%v", row.TLSData)
-						s.Title = &row.Title
-						s.Port = &row.Port
-						s.WebServer = &row.WebServer
-						s.Row = &row
-						s.Do()
+				for {
+					ok := false
+					for _, s := range mf {
 						s.Lock()
-						s.isUsed = false
+						if !s.isUsed {
+							s.isUsed = true
+							s.Unlock()
+							s.ResponseHeader = &row.RawHeader //不要拷贝
+							s.ResponseBody = &row.ResponseBody
+							s.TLSData = fmt.Sprintf("%v", row.TLSData)
+							s.Title = &row.Title
+							s.Port = &row.Port
+							s.WebServer = &row.WebServer
+							s.Row = &row
+							s.Do()
+							s.Lock()
+							s.isUsed = false
+							s.Unlock()
+							ok = true
+							break
+						}
 						s.Unlock()
-						//	ok = true
+					}
+					if ok {
 						break
 					}
-					s.Unlock()
-				}
-				//		if ok {
-				//		break
-				//	}
 
-				//}
+				}
 			}
 			row.TaskId = taskid
 			mu.Lock()
 			defer mu.Unlock()
-			jsonEncoder.Encode(row) //Encoder  线程不安全 需要加锁
+			err = jsonEncoder.Encode(row)
+			if err != nil {
+				fmt.Println("EncodeErr: ", err)
+			} //Encoder  线程不安全 需要加锁
+			atomic.AddUint64(&OutLines, 1)
+		}(s[:len(s)-1])
 
-		}(s)
 	}
 
 }
@@ -313,7 +359,6 @@ func (f *MFinger) Do() {
 		}
 		if out.Value().(bool) {
 			f.Row.Finger = append(f.Row.Finger, v.Product)
-			//fmt.Printf("%s %s\n", v.Product, row.URL)
 		}
 	}
 
@@ -343,11 +388,6 @@ func (f *MFinger) Init() {
 				[]*cel.Type{cel.StringType},
 				cel.BoolType,
 				cel.UnaryBinding(func(lhs ref.Val) ref.Val {
-					//没实现
-					//return types.Bool(false)
-					//优化性能 使用 strings.Builder 不要使用+
-					//优化性能 预先拼接
-					//优化内存占用 分别判断
 					return types.Bool(strings.Contains(*f.ResponseHeader, lhs.Value().(string)) || strings.Contains(*f.ResponseBody, lhs.Value().(string)))
 				},
 				),
@@ -390,7 +430,7 @@ func (f *MFinger) Init() {
 				cel.BoolType,
 				cel.UnaryBinding(func(lhs ref.Val) ref.Val {
 
-					return types.Bool(strings.Contains(f.TLSData, lhs.Value().(string)))
+					return types.Bool(strings.Contains(fmt.Sprintf("%v", f.TLSData), lhs.Value().(string)))
 				},
 				),
 			),
@@ -470,19 +510,20 @@ func (f *MFinger) Init() {
 	// Check iss for error in both Parse and Check.
 	//file, _ := os.Open("finger.json")
 	file, _ := os.Open("finger.json")
-	//const maxCapacity = 1024 * 1024 * 10// 指纹应该不会太长吧 应该不会吧
+	//const maxCapacity = 1024 * 1024 * 10
 	//buf := make([]byte, maxCapacity)
 	input := bufio.NewScanner(file)
 	//input.Buffer(buf, maxCapacity)
 	for input.Scan() {
-		s := input.Text()
+		s := input.Bytes()
 		var rule Rule
-		json.Unmarshal([]byte(s), &rule)
+		err := json.Unmarshal(s, &rule)
+		if err != nil {
+			fmt.Println("FingerDecodeErr:", string(s), err)
+		}
 		ast, iss := env.Compile(rule.Rule)
 		if iss.Err() != nil {
-			//log.Printf(iss.Err().Error())
-			//log.Printf(rule.Rule)
-			//log.Fatalf("")
+			//fmt.Println("FingerCompileErr:", string(s), iss.Err().Error())
 			continue
 		}
 		prg, err := env.Program(ast)
