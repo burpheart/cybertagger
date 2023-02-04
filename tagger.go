@@ -293,16 +293,18 @@ func RunNew(finger bool, src string, dst string, taskid string) {
 				fmt.Println("IPDbErr:", row.Host)
 				row.Country = "未知"
 			}
-			switch len(a) {
-			case 3:
+			switch {
+			case len(a) >= 3:
 				row.Country = a[0]
 				row.Province = a[1]
 				row.City = a[2]
-			case 2:
+			case len(a) == 2:
 				row.Country = a[0]
 				row.Province = a[1]
-			case 1:
+			case len(a) == 1:
 				row.Country = a[0]
+			default:
+				row.Country = "未知"
 			}
 			row.Ip = row.Host
 			if finger {
